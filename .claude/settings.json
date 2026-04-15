@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('entries:', len\\(d.get\\('entry', []\\)\\)\\)\")",
+      "Bash(curl -s \"http://localhost:8080/fhir/Patient?identifier=urn:oid:HOSPITAL_A%7CMRN-77001\")",
+      "Bash(curl -s \"http://localhost:8080/fhir/Patient/1000\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('id:', d.get\\('id'\\), 'identifier:', d.get\\('identifier'\\)\\)\")",
+      "Bash(python -c \"import httpx; u = httpx.URL\\('http://example.com/Patient', params={'identifier': 'sys|val'}\\); print\\(u\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -c \"from urllib.parse import urlencode; print\\(urlencode\\({'identifier': 'sys|val'}\\)\\)\")"
+    ]
+  }
+}
