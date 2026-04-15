@@ -49,19 +49,34 @@ In real-world HL7 v2 integrations, **order messages (ORM) often arrive before th
 
 ### How it works
 
+This POC uses FHIR **conditional create** (`If-None-Exist` header), which is
+the recommended approach over a naive search-then-create sequence:
+
 ```
 1. Extract patient identifier from PID-3
-2. GET /Patient?identifier={system}|{value}
-3. If found → use existing Patient reference
-4. If not found → POST /Patient → use new reference
-5. POST /ServiceRequest with subject → Patient reference
+2. POST /Patient with header If-None-Exist: identifier={system}|{value}
+3. HAPI checks at the database level (not search index):
+   - If no match → creates Patient, returns 201
+   - If match found → returns existing Patient, returns 200
+4. POST /ServiceRequest with subject → Patient reference
 ```
+
+**Why conditional create instead of GET-then-POST?**
+
+A naive `GET /Patient?identifier=...` followed by `POST /Patient` has two problems:
+- **Search index lag**: FHIR servers like HAPI use async search indexing. A Patient
+  created milliseconds ago may not appear in search results yet, causing duplicates.
+- **Race conditions**: Two concurrent messages for the same patient can both pass
+  the "not found" check and both create a Patient.
+
+Conditional create solves both — HAPI evaluates `If-None-Exist` against the
+database directly, not the search index, and does so atomically.
 
 ### Edge cases to consider in production
 
-- **Race conditions**: Two ORM messages for the same new patient arriving simultaneously could both fail the lookup and create duplicate patients. Use conditional creates (`If-None-Exist` header) or an idempotency layer.
 - **Patient matching**: PID-3 MRN is the simplest match key, but production systems may need to match on MPI (Master Patient Index) or use multiple identifiers (MRN + SSN + DOB).
 - **Stale data**: If the patient was created from a prior ORM, it may have fewer demographics than the current message. Consider updating the Patient when a richer PID is received.
+- **Multiple identifiers**: When `If-None-Exist` matches more than one existing resource, HAPI returns 412 Precondition Failed. Handle this by narrowing the match criteria or resolving duplicates.
 
 ## Field-by-Field Mapping Table
 

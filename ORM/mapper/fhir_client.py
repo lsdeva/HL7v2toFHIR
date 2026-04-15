@@ -1,10 +1,11 @@
 """FHIR server HTTP helpers — lookup-or-create pattern for Patient."""
 
-import json
 import time
 import sys
 
 import httpx
+
+_client = httpx.Client(timeout=10)
 
 
 def wait_for_fhir_server(base_url: str, max_retries: int = 30, delay: int = 5) -> None:
@@ -12,7 +13,7 @@ def wait_for_fhir_server(base_url: str, max_retries: int = 30, delay: int = 5) -
     metadata_url = f"{base_url}/metadata"
     for attempt in range(1, max_retries + 1):
         try:
-            resp = httpx.get(metadata_url, timeout=10)
+            resp = _client.get(metadata_url)
             if resp.status_code == 200:
                 print(f"FHIR server ready after {attempt} attempt(s).")
                 return
@@ -24,99 +25,49 @@ def wait_for_fhir_server(base_url: str, max_retries: int = 30, delay: int = 5) -
     sys.exit(1)
 
 
-def lookup_patient(base_url: str, identifier_value: str, identifier_system: str) -> str | None:
-    """Search for an existing Patient by identifier.
+def lookup_or_create_patient(base_url: str, patient: dict) -> str:
+    """Create a Patient if one with the same identifier doesn't already exist.
 
-    Returns the Patient resource ID (e.g. "Patient/123") if found, None otherwise.
+    Uses FHIR conditional create (If-None-Exist header) which checks at the
+    database level, bypassing search index lag. HAPI returns:
+      - 201 Created  → new patient was created
+      - 200 OK       → existing patient was found (no duplicate created)
+
+    Returns the Patient reference string (e.g. "Patient/1000").
     """
-    # HAPI requires system|value for token search parameters
-    search_token = f"{identifier_system}|{identifier_value}"
-    resp = httpx.get(
-        f"{base_url}/Patient",
-        params={"identifier": search_token},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    bundle = resp.json()
+    identifier = patient.get("identifier", [{}])[0]
+    system = identifier.get("system", "")
+    value = identifier.get("value", "")
 
-    entries = bundle.get("entry", [])
-    if entries:
-        entry = entries[0]
-        resource = entry["resource"]
-        patient_id = resource["id"]
-        ref = f"Patient/{patient_id}"
-        print(f"  Found existing patient: {ref} (identifier={identifier_value})")
-        return ref
+    print(f"\n[Lookup-or-Create] Conditional create for Patient identifier={value} ...")
 
-    print(f"  Patient not found for identifier={identifier_value}")
-    return None
-
-
-def create_patient(base_url: str, patient: dict) -> str:
-    """POST a Patient resource and return its reference (e.g. "Patient/123").
-
-    Waits briefly for the search index to catch up so subsequent lookups
-    for the same identifier will find this patient.
-    """
-    resp = httpx.post(
+    resp = _client.post(
         f"{base_url}/Patient",
         json=patient,
-        headers={"Content-Type": "application/fhir+json"},
-        timeout=10,
+        headers={
+            "Content-Type": "application/fhir+json",
+            "If-None-Exist": f"identifier={system}|{value}",
+        },
     )
     resp.raise_for_status()
     body = resp.json()
     patient_id = body["id"]
     ref = f"Patient/{patient_id}"
-    print(f"  Created new patient: {ref}")
 
-    # Wait for HAPI's search index to commit the new resource
-    identifier = patient.get("identifier", [{}])[0]
-    system = identifier.get("system", "")
-    value = identifier.get("value", "")
-    if value:
-        for _ in range(10):
-            time.sleep(0.5)
-            check = httpx.get(
-                f"{base_url}/Patient",
-                params={"identifier": f"{system}|{value}"},
-                timeout=10,
-            )
-            if check.json().get("entry"):
-                break
+    if resp.status_code == 201:
+        print(f"  Patient not found — created new: {ref}")
+    else:
+        print(f"  Patient already exists — reusing: {ref}")
 
     return ref
 
 
-def lookup_or_create_patient(base_url: str, patient: dict) -> str:
-    """Find an existing Patient by identifier, or create one if not found.
-
-    This is the core pattern for order messages: the patient referenced in
-    PID may or may not already exist in the FHIR server. We search first,
-    then create only if needed.
-
-    Returns the Patient reference string.
-    """
-    identifier = patient.get("identifier", [{}])[0]
-    system = identifier.get("system", "")
-    value = identifier.get("value", "")
-
-    print(f"\n[Lookup-or-Create] Searching for Patient identifier={value} ...")
-    existing = lookup_patient(base_url, value, system)
-    if existing:
-        return existing
-
-    print(f"  Creating patient ...")
-    return create_patient(base_url, patient)
-
-
 def create_service_request(base_url: str, service_request: dict) -> dict:
     """POST a ServiceRequest resource and return the server response body."""
-    resp = httpx.post(
+    resp = _client.post(
         f"{base_url}/ServiceRequest",
         json=service_request,
         headers={"Content-Type": "application/fhir+json"},
-        timeout=10,
     )
     resp.raise_for_status()
     body = resp.json()
